@@ -1,5 +1,4 @@
 import os
-import io
 import json
 import threading
 import queue
@@ -13,9 +12,9 @@ from geopy.distance import geodesic
 import tkinter as tk
 from tkinter import messagebox, scrolledtext, ttk
 import tempfile
-from tkinter import simpledialog
-# ВАЖНО: включаем Agg ДО импорта pyplot, чтобы matplotlib не пытался работать через Tk
 import matplotlib
+import psycopg2
+from psycopg2.extras import execute_values, Json
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -26,19 +25,11 @@ from geopy.geocoders import Nominatim
 from PIL import Image, ImageTk
 import numpy as np
 
-from sklearn.cluster import MiniBatchKMeans, KMeans
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.inspection import permutation_importance
-from sklearn.feature_selection import f_classif
-from sklearn.preprocessing import OneHotEncoder
-
-from shapely.geometry import Point
+from sklearn.cluster import MiniBatchKMeans
 
 warnings.filterwarnings("ignore")
 
-# ==========================================================
-# Константы / пути
-# ==========================================================
+
 REFERENCE_COLORS = {
     "forest_nearby": (172, 206, 157),
     "water_nearby": (170, 211, 223),
@@ -52,9 +43,7 @@ MAPS_DIR = "maps"
 AUG_MAPS_DIR = "augmented_maps"
 
 
-# ==========================================================
-# UI helpers: disable/enable + progress window + async runner
-# ==========================================================
+
 def disable_widgets(widgets):
     for w in widgets:
         try:
@@ -72,11 +61,6 @@ def enable_widgets(widgets):
 
 
 class ProgressWindow:
-    """
-    Toplevel окно с прогресс-баром.
-    determinate=True: value/max.
-    determinate=False: крутилка.
-    """
 
     def __init__(self, master, title="Выполнение...", text="Пожалуйста, подождите...",
                  determinate=False, maximum=100):
@@ -86,7 +70,7 @@ class ProgressWindow:
         self.win.geometry("460x140")
         self.win.resizable(False, False)
         self.win.transient(master)
-        self.win.grab_set()  # блокируем основное окно
+        self.win.grab_set()
 
         self.label = tk.Label(self.win, text=text, wraplength=430, justify="left")
         self.label.pack(padx=14, pady=(14, 8), anchor="w")
@@ -95,7 +79,7 @@ class ProgressWindow:
         self.progress = ttk.Progressbar(self.win, orient="horizontal", length=430, mode=mode, maximum=maximum)
         self.progress.pack(padx=14, pady=(0, 12))
 
-        # запретить закрытие во время работы
+
         self.win.protocol("WM_DELETE_WINDOW", lambda: None)
 
         if not determinate:
@@ -203,9 +187,7 @@ class AsyncRunner:
         self.master.after(100, lambda: self._poll(on_done, on_error, on_progress))
 
 
-# ==========================================================
-# Track image assets: basemap / route / combined + META
-# ==========================================================
+
 def _calc_bounds_and_figsize(gdf_3857, pad_ratio=0.10, fallback_pad=50, base_w=8.0):
     minx, miny, maxx, maxy = gdf_3857.total_bounds
     pad_x = (maxx - minx) * pad_ratio if (maxx - minx) != 0 else fallback_pad
@@ -252,7 +234,6 @@ def save_track_assets(df_track: pd.DataFrame, track_id: int, out_dir: str = MAPS
     route_path = os.path.join(out_dir, f"track_{track_id}_route.png")
     combined_path = os.path.join(out_dir, f"track_{track_id}_combined.png")
 
-    # 1) basemap (фон без маршрута)
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
     fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
     ax.set_xlim(tminx, tmaxx)
@@ -265,7 +246,6 @@ def save_track_assets(df_track: pd.DataFrame, track_id: int, out_dir: str = MAPS
     plt.savefig(basemap_path, dpi=300, pad_inches=0, bbox_inches=None)
     plt.close(fig)
 
-    # meta: bbox + размер basemap
     base_img = Image.open(basemap_path)
     W, H = base_img.size
     meta = {
@@ -276,7 +256,6 @@ def save_track_assets(df_track: pd.DataFrame, track_id: int, out_dir: str = MAPS
     with open(_meta_path(out_dir, track_id), "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
 
-    # 2) route (маршрут на прозрачном фоне)
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
     fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
     ax.set_xlim(tminx, tmaxx)
@@ -296,7 +275,6 @@ def save_track_assets(df_track: pd.DataFrame, track_id: int, out_dir: str = MAPS
     plt.savefig(route_path, dpi=300, pad_inches=0, bbox_inches=None, transparent=True)
     plt.close(fig)
 
-    # 3) combined (фон + маршрут)
     base_img_rgba = base_img.convert("RGBA")
     route_img = Image.open(route_path).convert("RGBA")
     if route_img.size != base_img_rgba.size:
@@ -307,9 +285,6 @@ def save_track_assets(df_track: pd.DataFrame, track_id: int, out_dir: str = MAPS
     return basemap_path, route_path, combined_path
 
 
-# ==========================================================
-# Environment by IMAGE (по картинке трека)
-# ==========================================================
 def classify_environment(colors, ref_colors, threshold=30):
     attrs = {k: False for k in ref_colors.keys()}
     for c in colors:
@@ -360,13 +335,11 @@ def add_environment_for_track_from_image(
     base_img = Image.open(basemap_png_path).convert("RGB")
     img = _ensure_rgb_np(base_img)
 
-    # метры на пиксель (по bbox)
     mpp_x = (tmaxx - tminx) / max(W, 1)
     mpp_y = (tmaxy - tminy) / max(H, 1)
     mpp = float((mpp_x + mpp_y) / 2.0) if (mpp_x > 0 and mpp_y > 0) else max(mpp_x, mpp_y, 1.0)
     radius_px = int(max(3, radius_m / max(mpp, 1e-9)))
 
-    # точки -> 3857
     gdf = gpd.GeoDataFrame(
         df_track,
         geometry=gpd.points_from_xy(df_track.longitude, df_track.latitude),
@@ -378,7 +351,6 @@ def add_environment_for_track_from_image(
 
     env_rows = []
     for x, y in zip(xs, ys):
-        # px (0..W-1), py (0..H-1)
         px = int((x - tminx) / max(tmaxx - tminx, 1e-9) * (W - 1))
         py = int((tmaxy - y) / max(tmaxy - tminy, 1e-9) * (H - 1))
 
@@ -398,7 +370,6 @@ def add_environment_for_track_from_image(
 
         pixels = patch.reshape(-1, 3)
 
-        # сэмпл чтобы быстрее
         if pixels.shape[0] > sample_max_pixels:
             idx = np.random.choice(pixels.shape[0], size=sample_max_pixels, replace=False)
             pixels = pixels[idx]
@@ -448,13 +419,11 @@ def visualize_environment_from_image_for_point(
     base_img = Image.open(basemap_png_path).convert("RGB")
     img_np = _ensure_rgb_np(base_img)
 
-    # метры на пиксель
     mpp_x = (tmaxx - tminx) / max(W, 1)
     mpp_y = (tmaxy - tminy) / max(H, 1)
     mpp = float((mpp_x + mpp_y) / 2.0) if (mpp_x > 0 and mpp_y > 0) else max(mpp_x, mpp_y, 1.0)
     radius_px = int(max(3, radius_m / max(mpp, 1e-9)))
 
-    # --- ВСЕ точки трека -> 3857 ---
     gdf_all = gpd.GeoDataFrame(
         df_track,
         geometry=gpd.points_from_xy(df_track.longitude, df_track.latitude),
@@ -464,20 +433,16 @@ def visualize_environment_from_image_for_point(
     xs = gdf_all.geometry.x.to_numpy()
     ys = gdf_all.geometry.y.to_numpy()
 
-    # --- 3857 -> пиксели basemap ---
-    # px = (x - tminx) / (tmaxx - tminx) * (W-1)
-    # py = (tmaxy - y) / (tmaxy - tminy) * (H-1)
+
     denom_x = max(tmaxx - tminx, 1e-9)
     denom_y = max(tmaxy - tminy, 1e-9)
 
     px_all = ((xs - tminx) / denom_x * (W - 1)).astype(int)
     py_all = ((tmaxy - ys) / denom_y * (H - 1)).astype(int)
 
-    # ограничим чтобы не улетали
     px_all = np.clip(px_all, 0, W - 1)
     py_all = np.clip(py_all, 0, H - 1)
 
-    # --- выбранная точка ---
     pos = np.where(df_track.index.to_numpy() == point_idx)[0]
     if len(pos) == 0:
         return None
@@ -486,7 +451,6 @@ def visualize_environment_from_image_for_point(
     px = int(px_all[ppos])
     py = int(py_all[ppos])
 
-    # --- patch вокруг выбранной точки ---
     x0 = max(0, px - radius_px)
     x1 = min(W, px + radius_px)
     y0 = max(0, py - radius_px)
@@ -512,18 +476,14 @@ def visualize_environment_from_image_for_point(
     patch_path = os.path.join(out_dir, "env_debug_patch.png")
     palette_path = os.path.join(out_dir, "env_debug_palette.png")
 
-    # 1) basemap + маршрут + выбранная точка + круг
     fig, ax = plt.subplots(figsize=(9, 7))
     ax.imshow(img_np)
 
-    # маршрут (именно точки маршрута!)
-    ax.plot(px_all, py_all, linewidth=2)  # цвет не задаю по твоему правилу
+    ax.plot(px_all, py_all, linewidth=2)
 
-    # выбранная точка маршрута
-    ax.scatter([px], [py], s=110, marker="o")  # точка заметнее
-    ax.scatter([px], [py], s=90, marker="x")  # крестик сверху
+    ax.scatter([px], [py], s=110, marker="o")
+    ax.scatter([px], [py], s=90, marker="x")
 
-    # круг радиуса 500м в пикселях
     circ = plt.Circle((px, py), radius_px, fill=False, linewidth=2)
     ax.add_patch(circ)
 
@@ -533,7 +493,6 @@ def visualize_environment_from_image_for_point(
     fig.savefig(map_path, dpi=200)
     plt.close(fig)
 
-    # 2) patch
     fig, ax = plt.subplots(figsize=(6, 6))
     ax.imshow(patch_np)
     ax.set_title("Patch вокруг точки маршрута (радиус 500м)")
@@ -542,7 +501,6 @@ def visualize_environment_from_image_for_point(
     fig.savefig(patch_path, dpi=200)
     plt.close(fig)
 
-    # 3) палитра кластеров
     palette = np.zeros((60, 60 * len(colors), 3), dtype=np.uint8)
     for i, c in enumerate(colors):
         palette[:, i * 60:(i + 1) * 60, :] = c
@@ -619,10 +577,6 @@ def add_environment_attributes_by_track_images(df: pd.DataFrame, progress_cb=Non
 
     return pd.concat(parts, ignore_index=True)
 
-
-# ==========================================================
-# Анализ значимых атрибутов (ОТДЕЛЬНЫЙ DF, НЕ трогаем основной)
-# ==========================================================
 def build_window_features(df: pd.DataFrame, window_size: int = 5) -> pd.DataFrame:
     """
     Делает новый DataFrame с признаками по "участкам" (окнам).
@@ -700,9 +654,6 @@ def build_window_features(df: pd.DataFrame, window_size: int = 5) -> pd.DataFram
     return pd.DataFrame(rows)
 
 
-# ==========================================================
-# GPX Loader Agent
-# ==========================================================
 class GPXLoaderAgent:
     def __init__(self):
         self.dataframes = []
@@ -839,17 +790,13 @@ class GPXLoaderAgent:
         if "time" not in df.columns:
             return df
 
-        # только строки, где нет температуры
         mask = df["temperature"].isna()
         if mask.sum() == 0:
             return df
 
-        # округляем координаты -> кэш лучше работает
         lat_r = df.loc[mask, "latitude"].round(coord_round)
         lon_r = df.loc[mask, "longitude"].round(coord_round)
 
-        # date в UTC (день запроса)
-        # если time timezone-aware -> в UTC, иначе считаем что уже UTC
         t = df.loc[mask, "time"]
         try:
             t_utc = t.dt.tz_convert("UTC")
@@ -858,7 +805,6 @@ class GPXLoaderAgent:
 
         date_str = t_utc.dt.strftime("%Y-%m-%d")
 
-        # часовой ключ, под который match’им ответ open-meteo
         hour_key = t_utc.dt.floor("h").dt.strftime("%Y-%m-%dT%H:00")
 
         tmp = pd.DataFrame({
@@ -871,8 +817,7 @@ class GPXLoaderAgent:
 
         groups = tmp.groupby(["lat", "lon", "date"], sort=False)
 
-        # кэш на время выполнения
-        cache = {}  # (lat, lon, date) -> dict(time->temp)
+        cache = {}
 
         total_groups = len(groups)
         if progress_cb:
@@ -894,7 +839,6 @@ class GPXLoaderAgent:
 
             day_map = cache[key] or {}
 
-            # проставляем температуры
             for _, row in g.iterrows():
                 hk = row["hour_key"]
                 temp = day_map.get(hk, None)
@@ -953,9 +897,6 @@ class GPXLoaderAgent:
             return None
 
 
-# ==========================================================
-# GPX Map Agent (показываем combined если есть)
-# ==========================================================
 class GPXMapAgent:
     def __init__(self, df: pd.DataFrame):
         self.df = df
@@ -1007,7 +948,7 @@ class GPXMapAgent:
 def compute_corr_heatmap_and_explanations(
         df_windows: pd.DataFrame,
         top_k: int = 10,
-        corr_threshold: float = 0.45,  # порог для "сильной" корреляции в объяснениях
+        corr_threshold: float = 0.45,
 ):
     """
     Делает:
@@ -1022,19 +963,15 @@ def compute_corr_heatmap_and_explanations(
 
     dfw = df_windows.copy()
 
-    # берем числовые колонки
     num = dfw.select_dtypes(include=[np.number]).copy()
 
-    # выкидываем служебные
     for col in ["track_id", "window_start"]:
         if col in num.columns:
             num.drop(columns=[col], inplace=True)
 
-    # если мало признаков
     if num.shape[1] < 3:
         return None
 
-    # чистим nan/inf
     num = num.replace([np.inf, -np.inf], np.nan)
     num = num.dropna(axis=1, how="all")
     num = num.fillna(num.median(numeric_only=True))
@@ -1042,27 +979,21 @@ def compute_corr_heatmap_and_explanations(
     if num.shape[1] < 3:
         return None
 
-    corr = num.corr(method="spearman")  # spearman устойчивее к выбросам
+    corr = num.corr(method="spearman")
 
-    # "связность" признака = средняя абсолютная корреляция со всеми остальными
     abs_corr = corr.abs()
-    # убираем диагональ
     np.fill_diagonal(abs_corr.values, np.nan)
     connectivity = abs_corr.mean(axis=1).sort_values(ascending=False)
 
     top_features = connectivity.head(min(top_k, len(connectivity))).index.tolist()
 
-    # ---- формируем объяснения для top_features ----
     explanations = []
     for feat in top_features:
-        # топ корреляции для этого признака
         s = corr[feat].drop(index=feat).sort_values(key=lambda x: x.abs(), ascending=False)
 
-        # берем те, что выше порога
         strong = s[s.abs() >= corr_threshold].head(4)
 
         if len(strong) == 0:
-            # если нет сильных корреляций, всё равно даём число "связности"
             explanations.append(
                 f"• **{feat}** важен: у него высокая средняя |корреляция| с другими признаками "
                 f"(связность ≈ {connectivity.loc[feat]:.3f}), то есть он хорошо описывает общий характер участка."
@@ -1077,8 +1008,6 @@ def compute_corr_heatmap_and_explanations(
             f"и помогает отличать разные типы участков."
         )
 
-    # ---- рисуем heatmap ----
-    # (без seaborn, только matplotlib)
     heatmap_path = os.path.join(tempfile.gettempdir(), "corr_heatmap.png")
 
     fig, ax = plt.subplots(figsize=(10, 8))
@@ -1110,18 +1039,15 @@ def _select_existing_feature_columns(df: pd.DataFrame):
     if df is None or df.empty:
         return []
 
-    # исключаем очевидные не-фичи
     exclude = {
         "track_id",
         "time",
         "latitude",
         "longitude",
         "geometry",
-        # если есть такие:
         "window_start",
     }
 
-    # берём числовые + булевые
     cand = []
     for c in df.columns:
         if c in exclude:
@@ -1137,8 +1063,8 @@ def _select_existing_feature_columns(df: pd.DataFrame):
 def compute_heatmap_and_pick_features_from_existing_df(
         df: pd.DataFrame,
         top_k: int = 12,
-        strong_corr_threshold: float = 0.45,  # для объяснений
-        drop_corr_threshold: float = 0.85,  # для удаления дублей
+        strong_corr_threshold: float = 0.45,
+        drop_corr_threshold: float = 0.85,
 ):
     """
     1) Берём только существующие признаки result_df (числовые + булевые).
@@ -1153,34 +1079,26 @@ def compute_heatmap_and_pick_features_from_existing_df(
 
     X = df[cols].copy()
 
-    # bool -> int (0/1)
     for c in X.columns:
         if pd.api.types.is_bool_dtype(X[c]):
             X[c] = X[c].astype(int)
 
-    # чистим nan/inf
     X = X.replace([np.inf, -np.inf], np.nan)
 
-    # если колонка вся nan — выкинуть
     X = X.dropna(axis=1, how="all")
     if X.shape[1] < 3:
         return None
 
-    # заполняем nan медианой
     X = X.fillna(X.median(numeric_only=True))
 
-    # корреляции
     corr = X.corr(method="spearman")
 
-    # связность = mean(|corr|) без диагонали
     abs_corr = corr.abs().copy()
     np.fill_diagonal(abs_corr.values, np.nan)
     connectivity = abs_corr.mean(axis=1).sort_values(ascending=False)
 
-    # кандидаты top_k по связности
     candidates = connectivity.head(min(top_k, len(connectivity))).index.tolist()
 
-    # убираем мультиколлинеарность: если два признака сильно коррелируют, оставляем один
     selected = []
     for f in candidates:
         keep = True
@@ -1209,7 +1127,6 @@ def compute_heatmap_and_pick_features_from_existing_df(
             f"Это означает, что {f} отражает общий фактор структуры данных и помогает различать типы участков."
         )
 
-    # heatmap
     import tempfile
 
     heatmap_path = os.path.join(tempfile.gettempdir(), "corr_heatmap.png")
@@ -1234,10 +1151,6 @@ def compute_heatmap_and_pick_features_from_existing_df(
     }
 
 
-# ==========================================================
-# GUI
-# ==========================================================
-
 def cleanup_image_folders():
     """Чистим папки с картинками треков при выходе из программы."""
     for folder in [MAPS_DIR, AUG_MAPS_DIR]:
@@ -1247,10 +1160,6 @@ def cleanup_image_folders():
         except Exception:
             pass
 
-
-# ==========================================================
-# Cleanup при закрытии
-# ==========================================================
 
 class GPXAppGUI:
     def __init__(self, master):
@@ -1328,7 +1237,6 @@ class GPXAppGUI:
                 for tid in sorted(self.result_df["track_id"].unique()):
                     df_t = self.result_df[self.result_df["track_id"] == tid].copy()
 
-                    # 🔴 ВАЖНО: Excel не поддерживает datetime с timezone
                     for col in df_t.columns:
                         if pd.api.types.is_datetime64tz_dtype(df_t[col]):
                             df_t[col] = df_t[col].dt.tz_localize(None)
@@ -1347,7 +1255,6 @@ class GPXAppGUI:
         else:
             enable_widgets(self.all_buttons)
 
-    # ----------------- Загрузка -----------------
 
     def create_tab_load(self):
         tk.Label(self.tab_load, text="Загрузка треков", font=("Arial", 14, "bold")).pack(pady=(10, 4))
@@ -1363,7 +1270,6 @@ class GPXAppGUI:
         )
         tk.Label(self.tab_load, text=hint, justify="left", wraplength=900).pack(pady=(0, 8), anchor="w", padx=12)
 
-        # панель кнопок
         btn_frame = tk.Frame(self.tab_load)
         btn_frame.pack(fill="x", padx=12, pady=(0, 6))
 
@@ -1387,33 +1293,28 @@ class GPXAppGUI:
         )
         self.btn_clear.pack(side="left")
 
-        # счётчик
         self.links_counter_var = tk.StringVar(value="Ссылок: 0 (уникальных: 0)")
         tk.Label(self.tab_load, textvariable=self.links_counter_var).pack(anchor="w", padx=12, pady=(0, 4))
 
-        # поле ввода
         self.text_area = scrolledtext.ScrolledText(self.tab_load, width=110, height=14)
         self.text_area.pack(padx=12, pady=(0, 10), fill="both", expand=False)
 
-        # placeholder
         placeholder = "Вставьте ссылки сюда...\n(Одна ссылка на строку)"
         self.text_area.insert("1.0", placeholder)
         self.text_area.bind("<FocusIn>", self._clear_placeholder_if_needed)
         self.text_area.bind("<KeyRelease>", lambda _e: self.update_links_counter())
 
-        # кнопка загрузки
         self.btn_load = self._reg_btn(
             tk.Button(self.tab_load, text="Загрузить треки", width=30, command=self.load_tracks)
         )
         self.btn_load.pack(pady=10)
 
-        # обновим счётчик сразу
         self.update_links_counter()
 
     def load_tracks(self):
         urls = self.get_links_from_ui()
         urls = [u.strip() for u in urls if u.strip()]
-        urls = list(dict.fromkeys(urls))  # убираем дубликаты, сохраняя порядок
+        urls = list(dict.fromkeys(urls))
 
         if len(urls) == 0:
             messagebox.showwarning("Ошибка", "Вставьте хотя бы одну ссылку")
@@ -1437,7 +1338,6 @@ class GPXAppGUI:
                 df = self.agent._load_single_gpx(url, i)
                 df_filtered = self.agent._filter_track_points(df)
 
-                # ✅ локально сохраняем картинки + meta
                 try:
                     save_track_assets(df_filtered, track_id=i, out_dir=MAPS_DIR)
                 except Exception:
@@ -1472,10 +1372,8 @@ class GPXAppGUI:
 
         self.runner.run(worker, on_done=on_done, on_error=on_error, on_progress=on_progress)
 
-    # ----------------- Обработка -----------------
 
     def create_tab_process(self):
-        # основной жирный заголовок
         tk.Label(
             self.tab_process,
             text="Обработка треков",
@@ -1483,7 +1381,6 @@ class GPXAppGUI:
             bg="#f2f2f2"
         ).pack(pady=(15, 0))
 
-        # подзаголовок (не жирный, по центру)
         tk.Label(
             self.tab_process,
             text="Выполните действия поочередно",
@@ -1688,7 +1585,6 @@ class GPXAppGUI:
 
         self.runner.run(worker, on_done=on_done, on_error=on_error, on_progress=on_progress)
 
-    # ----------------- Просмотр -----------------
 
     def create_tab_view(self):
         tk.Label(
@@ -1744,13 +1640,11 @@ class GPXAppGUI:
 
         track_id = int(track_id)
 
-        # ✅ 1) если уже есть combined
         combined_path = os.path.join(MAPS_DIR, f"track_{track_id}_combined.png")
         if os.path.exists(combined_path):
             self._open_image_window(combined_path, f"Карта трека {track_id}")
             return
 
-        # ✅ 2) fallback — построим картинку
         map_agent = GPXMapAgent(self.result_df)
         png_path = map_agent.plot_track_to_png(track_id, save_folder=MAPS_DIR)
         self._open_image_window(png_path, f"Карта трека {track_id}")
@@ -1776,7 +1670,6 @@ class GPXAppGUI:
         text.insert(tk.END, df.to_string())
         text.config(state="disabled")
 
-    # ----------------- Аугментация -----------------
 
     def create_tab_augment(self):
         tk.Label(
@@ -1785,7 +1678,6 @@ class GPXAppGUI:
             font=("Arial", 14, "bold")
         ).pack(pady=10)
 
-        # --- кнопка аугментации с подсказкой ---
         frame = tk.Frame(self.tab_augment)
         frame.pack(pady=8)
 
@@ -2017,16 +1909,14 @@ class GPXAppGUI:
 
         def worker(_progress_cb):
             import matplotlib
-            matplotlib.use("Agg")  # безопасно для потоков
+            matplotlib.use("Agg")
             import matplotlib.pyplot as plt
             import seaborn as sns
             import tempfile
             import numpy as np
-            import pandas as pd
 
             try:
                 df = self.result_df.copy()
-                # выбираем числовые и булевые колонки
                 numeric_cols = df.select_dtypes(include=[np.number, bool]).columns.tolist()
                 if not numeric_cols:
                     return None
@@ -2034,7 +1924,6 @@ class GPXAppGUI:
                 df_num = df[numeric_cols].fillna(0)
                 corr = df_num.corr(method='spearman')
 
-                # создаём временный файл для heatmap
                 tmp_file = os.path.join(tempfile.gettempdir(), "gpx_heatmap.png")
 
                 plt.figure(figsize=(10, 8))
@@ -2044,7 +1933,6 @@ class GPXAppGUI:
                 plt.savefig(tmp_file)
                 plt.close()
 
-                # выбираем top фичи по средней абсолютной корреляции
                 avg_corr = corr.abs().mean().sort_values(ascending=False)
                 selected_features = avg_corr.head(12).index.tolist()
                 explanations = [f"{f}: средняя |corr| = {avg_corr[f]:.2f}" for f in selected_features]
@@ -2072,13 +1960,9 @@ class GPXAppGUI:
             win = tk.Toplevel(self.master)
             win.title("Значимые атрибуты (heatmap Spearman)")
 
-            # общий контейнер
             main_frame = tk.Frame(win)
             main_frame.pack(fill="both", expand=True, padx=10, pady=10)
 
-            # --------------------
-            # Левая часть — heatmap
-            # --------------------
             left_frame = tk.Frame(main_frame)
             left_frame.pack(side="left", fill="both", expand=False)
 
@@ -2097,9 +1981,6 @@ class GPXAppGUI:
                 lbl.image = img_tk
                 lbl.pack()
 
-            # --------------------
-            # Правая часть — текст
-            # --------------------
             right_frame = tk.Frame(main_frame)
             right_frame.pack(side="left", fill="both", expand=True, padx=(10, 0))
 
@@ -2147,11 +2028,8 @@ class GPXAppGUI:
         if not raw_text:
             return []
 
-        # заменим разделители на перенос строк
         s = raw_text.replace(";", "\n").replace(",", "\n").replace("\t", "\n")
 
-        # пробелы тоже считаем разделителями, но аккуратно:
-        # сначала разделим по строкам, потом внутри строк по пробелам
         parts = []
         for line in s.splitlines():
             line = line.strip()
@@ -2162,20 +2040,18 @@ class GPXAppGUI:
                 if token:
                     parts.append(token)
 
-        # финальная очистка
         parts = [p.strip() for p in parts if p.strip()]
         return parts
 
     def get_links_from_ui(self):
         raw = self.text_area.get("1.0", tk.END)
         links = self.parse_links_from_text(raw)
-        # убираем placeholder если остался
         links = [u for u in links if not u.startswith("Вставьте ссылки сюда")]
         return links
 
     def update_links_counter(self):
         links = self.get_links_from_ui()
-        uniq = list(dict.fromkeys(links))  # сохраняем порядок
+        uniq = list(dict.fromkeys(links))
         self.links_counter_var.set(f"Ссылок: {len(links)} (уникальных: {len(uniq)})")
 
     def paste_links_from_clipboard(self):
@@ -2194,7 +2070,6 @@ class GPXAppGUI:
         current = self.get_links_from_ui()
         merged = current + links
 
-        # перезаписываем как “одна ссылка на строку”
         self.text_area.delete("1.0", tk.END)
         self.text_area.insert("1.0", "\n".join(merged))
         self.update_links_counter()
@@ -2222,7 +2097,6 @@ class GPXAppGUI:
             if not (u.startswith("http://") or u.startswith("https://")):
                 bad.append(f"{i}) {u} (не начинается с http/https)")
 
-        # дубликаты
         seen = set()
         dups = []
         for u in links:
@@ -2255,14 +2129,6 @@ class GPXAppGUI:
 
         messagebox.showinfo("Проверка ссылок", "\n".join(msg_lines))
 
-    # --- дальше у тебя идёт show_environment_debug / _db_save_track_bundle / _ensure_track_combined_image / _set_db_status ---
-    # Я их могу так же полностью отформатировать, но они уже почти норм по структуре.
-    # Если хочешь — просто скинь оставшийся хвост (или файл целиком), и я прогоню весь файл единообразно.
-
-
-# ==========================================================
-# MAIN
-# ==========================================================
 
 if __name__ == "__main__":
     root = tk.Tk()
