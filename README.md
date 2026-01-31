@@ -1,4 +1,3 @@
-# name1
 import os
 import io
 import json
@@ -860,7 +859,7 @@ class GPXLoaderAgent:
         date_str = t_utc.dt.strftime("%Y-%m-%d")
 
         # часовой ключ, под который match’им ответ open-meteo
-        hour_key = t_utc.dt.floor("H").dt.strftime("%Y-%m-%dT%H:00")
+        hour_key = t_utc.dt.floor("h").dt.strftime("%Y-%m-%dT%H:00")
 
         tmp = pd.DataFrame({
             "idx": df.loc[mask].index,
@@ -1313,7 +1312,10 @@ class GPXAppGUI:
         каждый track_id -> отдельный лист.
         """
         if self.result_df is None or self.result_df.empty:
-            messagebox.showwarning("Ошибка", "Сначала загрузите треки")
+            messagebox.showwarning(
+                "Ошибка",
+                "Для выполнения операции необходимо сначала загрузить данные."
+            )
             return
 
         out_dir = os.path.join(os.getcwd(), "exports")
@@ -1326,14 +1328,18 @@ class GPXAppGUI:
                 for tid in sorted(self.result_df["track_id"].unique()):
                     df_t = self.result_df[self.result_df["track_id"] == tid].copy()
 
-                    # Excel ограничивает имя листа 31 символом
+                    # 🔴 ВАЖНО: Excel не поддерживает datetime с timezone
+                    for col in df_t.columns:
+                        if pd.api.types.is_datetime64tz_dtype(df_t[col]):
+                            df_t[col] = df_t[col].dt.tz_localize(None)
+
                     sheet_name = f"track_{int(tid)}"
                     df_t.to_excel(writer, sheet_name=sheet_name[:31], index=False)
 
             messagebox.showinfo("Готово", f"Сохранено в один файл:\n{out_path}")
+
         except Exception as e:
             messagebox.showerror("Ошибка сохранения", str(e))
-
 
     def set_busy(self, busy: bool):
         if busy:
@@ -1347,13 +1353,13 @@ class GPXAppGUI:
         tk.Label(self.tab_load, text="Загрузка треков", font=("Arial", 14, "bold")).pack(pady=(10, 4))
 
         hint = (
-            "Как вводить ссылки:\n"
-            "• Одна ссылка = одна строка\n"
-            "• Можно вставить сразу много ссылок — каждая на новой строке\n"
-            "• Также можно вставить текст, где ссылки разделены пробелами / запятыми / точкой с запятой\n\n"
-            "Пример:\n"
-            "https://caucasia.ru/track/123\n"
-            "https://caucasia.ru/track/456\n"
+            "Формат ввода ссылок на GPX-треки:\n"
+            "• Каждая ссылка может быть указана на отдельной строке\n"
+            "• Допускается вставка списка ссылок за один раз\n"
+            "• Ссылки могут быть разделены переносами строк, пробелами, запятыми или точкой с запятой\n\n"
+            "Пример корректного ввода:\n"
+            "https://caucasia.ru/track/295\n"
+            "https://caucasia.ru/track/638\n"
         )
         tk.Label(self.tab_load, text=hint, justify="left", wraplength=900).pack(pady=(0, 8), anchor="w", padx=12)
 
@@ -1367,12 +1373,12 @@ class GPXAppGUI:
         self.btn_paste.pack(side="left", padx=(0, 6))
 
         self.btn_validate = self._reg_btn(
-            tk.Button(btn_frame, text="Проверить ссылки", command=self.validate_links_ui)
+            tk.Button(btn_frame, text="Проверка корректности ссылок", command=self.validate_links_ui)
         )
         self.btn_validate.pack(side="left", padx=(0, 6))
 
         self.btn_dedup = self._reg_btn(
-            tk.Button(btn_frame, text="Удалить дубликаты", command=self.dedup_links_ui)
+            tk.Button(btn_frame, text="Удалить повторяющиеся ссылки", command=self.dedup_links_ui)
         )
         self.btn_dedup.pack(side="left", padx=(0, 6))
 
@@ -1457,7 +1463,7 @@ class GPXAppGUI:
             self.set_busy(False)
             self.update_track_list()
             self.update_augment_list()
-            messagebox.showinfo("Успех", "Треки загружены! (карты+meta сохранены в maps/)")
+            messagebox.showinfo("Готово", "Загрузка треков успешно завершена. (карты+meta сохранены в maps/)")
 
         def on_error(err):
             pwin.close()
@@ -1469,11 +1475,22 @@ class GPXAppGUI:
     # ----------------- Обработка -----------------
 
     def create_tab_process(self):
+        # основной жирный заголовок
         tk.Label(
             self.tab_process,
-            text="Обработка треков: выполните действия по шагам",
+            text="Обработка треков",
             font=("Arial", 14, "bold"),
-        ).pack(pady=10)
+            bg="#f2f2f2"
+        ).pack(pady=(15, 0))
+
+        # подзаголовок (не жирный, по центру)
+        tk.Label(
+            self.tab_process,
+            text="Выполните действия поочередно",
+            font=("Arial", 10),
+            bg="#f2f2f2",
+            fg="#555555"
+        ).pack(pady=(0, 10))
 
         def create_button_with_info(parent, text, command, info_text):
             frame = tk.Frame(parent)
@@ -1483,7 +1500,7 @@ class GPXAppGUI:
             btn.pack(side="left")
 
             info_btn = self._reg_btn(
-                tk.Button(frame, text="?", width=3, command=lambda: messagebox.showinfo("Информация", info_text))
+                tk.Button(frame, text="ⓘ", width=3, command=lambda: messagebox.showinfo("Информация", info_text))
             )
             info_btn.pack(side="left", padx=5)
 
@@ -1491,21 +1508,21 @@ class GPXAppGUI:
 
         create_button_with_info(
             self.tab_process,
-            "1. Определить регионы",
+            "1. Определение региона маршрута",
             self.assign_regions,
-            "Определяет географический регион для каждой точки трека.",
+            "Определяет регион прохождения маршрута на основе координат начальной точки.",
         )
         create_button_with_info(
             self.tab_process,
             "2. Добавить сезонность",
             self.add_seasons,
-            "Добавляет сезон (зима, весна, лето, осень) для каждой точки трека.",
+            "Автоматическое определение сезона на основе даты прохождения трека.",
         )
         create_button_with_info(
             self.tab_process,
             "3. Заполнить температуры",
             self.fill_temperatures,
-            "Заполняет температуры для точек без данных через API.",
+            "Заполняет пропущенные значения температуры с использованием метеорологических данных.",
         )
         create_button_with_info(
             self.tab_process,
@@ -1524,7 +1541,7 @@ class GPXAppGUI:
 
     def assign_regions(self):
         if self.result_df is None or self.result_df.empty:
-            messagebox.showwarning("Ошибка", "Сначала загрузите треки")
+            messagebox.showwarning("Ошибка", "Для выполнения операции необходимо сначала загрузить данные.")
             return
 
         track_ids = sorted(self.result_df["track_id"].unique())
@@ -1559,7 +1576,7 @@ class GPXAppGUI:
             self.result_df["region"] = self.result_df["track_id"].map(regions)
             pwin.close()
             self.set_busy(False)
-            messagebox.showinfo("Успех", "Регионы определены!")
+            messagebox.showinfo("Готово", "Регионы определены!")
 
         def on_error(err):
             pwin.close()
@@ -1570,7 +1587,7 @@ class GPXAppGUI:
 
     def add_seasons(self):
         if self.result_df is None or self.result_df.empty:
-            messagebox.showwarning("Ошибка", "Сначала загрузите треки")
+            messagebox.showwarning("Ошибка", "Для выполнения операции необходимо сначала загрузить данные.")
             return
 
         self.set_busy(True)
@@ -1585,7 +1602,7 @@ class GPXAppGUI:
             self.set_busy(False)
             self.update_track_list()
             self.update_augment_list()
-            messagebox.showinfo("Успех", "Треки загружены! (карты+meta сохранены в maps/)")
+            messagebox.showinfo("Готово", "Сезонность добавлена.")
 
         def on_error(err):
             pwin.close()
@@ -1596,7 +1613,7 @@ class GPXAppGUI:
 
     def fill_temperatures(self):
         if self.result_df is None or self.result_df.empty:
-            messagebox.showwarning("Ошибка", "Сначала загрузите треки")
+            messagebox.showwarning("Ошибка", "Для выполнения операции необходимо сначала загрузить данные.")
             return
 
         self.set_busy(True)
@@ -1621,7 +1638,7 @@ class GPXAppGUI:
             self.result_df = df
             pwin.close()
             self.set_busy(False)
-            messagebox.showinfo("Успех", "Температуры заполнены!")
+            messagebox.showinfo("Готово", "Температуры заполнены!")
 
         def on_error(err):
             pwin.close()
@@ -1633,7 +1650,7 @@ class GPXAppGUI:
     def add_environment(self):
         """Окружение считается ПО КАРТИНКЕ трека (maps/ или augmented_maps/)."""
         if self.result_df is None or self.result_df.empty:
-            messagebox.showwarning("Ошибка", "Сначала загрузите треки")
+            messagebox.showwarning("Ошибка", "Для выполнения операции необходимо сначала загрузить данные.")
             return
 
         self.set_busy(True)
@@ -1662,7 +1679,7 @@ class GPXAppGUI:
 
             pwin.close()
             self.set_busy(False)
-            messagebox.showinfo("Успех", "Окружение добавлено (по картинкам)!")
+            messagebox.showinfo("Готово", "Окружение добавлено (по картинкам)!")
 
         def on_error(err):
             pwin.close()
@@ -1674,6 +1691,12 @@ class GPXAppGUI:
     # ----------------- Просмотр -----------------
 
     def create_tab_view(self):
+        tk.Label(
+            self.tab_view,
+            text="Просмотр треков",
+            font=("Arial", 14, "bold")
+        ).pack(pady=10)
+
         tk.Label(self.tab_view, text="Выберите трек:").pack()
 
         self.track_combo = ttk.Combobox(self.tab_view, state="readonly")
@@ -1711,7 +1734,7 @@ class GPXAppGUI:
 
     def show_track_map(self):
         if self.result_df is None or self.result_df.empty:
-            messagebox.showwarning("Ошибка", "Сначала загрузите треки")
+            messagebox.showwarning("Ошибка", "Для выполнения операции необходимо сначала загрузить данные.")
             return
 
         track_id = self.track_combo.get()
@@ -1734,7 +1757,7 @@ class GPXAppGUI:
 
     def show_dataframe(self):
         if self.result_df is None or self.result_df.empty:
-            messagebox.showwarning("Ошибка", "Сначала загрузите треки")
+            messagebox.showwarning("Ошибка", "Для выполнения операции необходимо сначала загрузить данные.")
             return
 
         track_id = self.track_combo.get()
@@ -1756,17 +1779,42 @@ class GPXAppGUI:
     # ----------------- Аугментация -----------------
 
     def create_tab_augment(self):
-        tk.Label(self.tab_augment, text="Аугментация треков").pack(pady=5)
+        tk.Label(
+            self.tab_augment,
+            text="Аугментация треков",
+            font=("Arial", 14, "bold")
+        ).pack(pady=10)
+
+        # --- кнопка аугментации с подсказкой ---
+        frame = tk.Frame(self.tab_augment)
+        frame.pack(pady=8)
 
         self.btn_augment_all = self._reg_btn(
             tk.Button(
-                self.tab_augment,
-                text="Аугментировать ВСЕ треки (фон 180° + окружение по картинке)",
+                frame,
+                text="Аугментировать все треки",
                 command=self.augment_all_tracks,
-                width=72,
+                width=40,
             )
         )
-        self.btn_augment_all.pack(pady=8)
+        self.btn_augment_all.pack(side="left")
+
+        info_btn = self._reg_btn(
+            tk.Button(
+                frame,
+                text="ⓘ",
+                width=3,
+                command=lambda: messagebox.showinfo(
+                    "Аугментация треков",
+                    "Выполняется аугментация всех загруженных треков:\n\n"
+                    "• Поворот фоновой карты на 180°\n"
+                    "• Формирование нового трека\n"
+                    "• Пересчёт окружения по изображению\n\n"
+                    "Каждый аугментированный трек добавляется как отдельный track_id."
+                ),
+            )
+        )
+        info_btn.pack(side="left", padx=6)
 
         tk.Label(self.tab_augment, text="Просмотр треков (оригинал + аугментированные):").pack(pady=10)
 
@@ -1801,7 +1849,7 @@ class GPXAppGUI:
 
     def show_selected_track_map(self):
         if self.result_df is None or self.result_df.empty:
-            messagebox.showwarning("Ошибка", "Сначала загрузите треки")
+            messagebox.showwarning("Ошибка", "Для выполнения операции необходимо сначала загрузить данные.")
             return
 
         track_id = self.augment_combo.get()
@@ -1825,7 +1873,7 @@ class GPXAppGUI:
 
     def show_selected_track_dataframe(self):
         if self.result_df is None or self.result_df.empty:
-            messagebox.showwarning("Ошибка", "Сначала загрузите треки")
+            messagebox.showwarning("Ошибка", "Для выполнения операции необходимо сначала загрузить данные.")
             return
 
         track_id = self.augment_combo.get()
@@ -1850,7 +1898,7 @@ class GPXAppGUI:
     def augment_all_tracks(self):
         """Твоя текущая логика аугментации (без изменений здесь)."""
         if self.result_df is None or self.result_df.empty:
-            messagebox.showwarning("Ошибка", "Сначала загрузите треки")
+            messagebox.showwarning("Ошибка", "Для выполнения операции необходимо сначала загрузить данные.")
             return
 
         original_ids = sorted(self.result_df["track_id"].unique())
@@ -1949,7 +1997,7 @@ class GPXAppGUI:
             self.set_busy(False)
             self.update_track_list()
             self.update_augment_list()
-            messagebox.showinfo("Успех", "Аугментация завершена!")
+            messagebox.showinfo("Готово", "Процесс аугментации маршрутов успешно завершён.")
 
         def on_error(err):
             pwin.close()
@@ -1960,7 +2008,7 @@ class GPXAppGUI:
 
     def show_significant_attributes(self):
         if self.result_df is None or self.result_df.empty:
-            messagebox.showwarning("Ошибка", "Сначала загрузите треки")
+            messagebox.showwarning("Ошибка", "Для выполнения операции необходимо сначала загрузить данные.")
             return
 
         self.set_busy(True)
@@ -1968,13 +2016,46 @@ class GPXAppGUI:
                               determinate=False)
 
         def worker(_progress_cb):
-            res = compute_heatmap_and_pick_features_from_existing_df(
-                self.result_df,
-                top_k=12,
-                strong_corr_threshold=0.45,
-                drop_corr_threshold=0.85,
-            )
-            return res
+            import matplotlib
+            matplotlib.use("Agg")  # безопасно для потоков
+            import matplotlib.pyplot as plt
+            import seaborn as sns
+            import tempfile
+            import numpy as np
+            import pandas as pd
+
+            try:
+                df = self.result_df.copy()
+                # выбираем числовые и булевые колонки
+                numeric_cols = df.select_dtypes(include=[np.number, bool]).columns.tolist()
+                if not numeric_cols:
+                    return None
+
+                df_num = df[numeric_cols].fillna(0)
+                corr = df_num.corr(method='spearman')
+
+                # создаём временный файл для heatmap
+                tmp_file = os.path.join(tempfile.gettempdir(), "gpx_heatmap.png")
+
+                plt.figure(figsize=(10, 8))
+                sns.heatmap(corr, annot=True, fmt=".2f", cmap="coolwarm", cbar=True)
+                plt.title("Корреляция признаков (Spearman)")
+                plt.tight_layout()
+                plt.savefig(tmp_file)
+                plt.close()
+
+                # выбираем top фичи по средней абсолютной корреляции
+                avg_corr = corr.abs().mean().sort_values(ascending=False)
+                selected_features = avg_corr.head(12).index.tolist()
+                explanations = [f"{f}: средняя |corr| = {avg_corr[f]:.2f}" for f in selected_features]
+
+                return {"heatmap_path": tmp_file, "selected_features": selected_features, "explanations": explanations}
+
+            except Exception as e:
+                import traceback
+                print("Ошибка при построении heatmap:", e)
+                print(traceback.format_exc())
+                raise e
 
         def on_done(res):
             pwin.close()
@@ -1983,53 +2064,62 @@ class GPXAppGUI:
             if res is None:
                 messagebox.showerror(
                     "Ошибка",
-                    "Недостаточно подходящих числовых/булевых атрибутов для корреляционного анализа.\n"
-                    "Подсказка: сначала посчитай окружение (forest_nearby и т.п.) и убедись, что есть числовые поля.",
+                    "Недостаточно числовых/булевых признаков для анализа.\n"
+                    "Добавьте атрибуты окружения и температуры."
                 )
                 return
 
             win = tk.Toplevel(self.master)
             win.title("Значимые атрибуты (heatmap Spearman)")
 
-            # heatmap image
-            img_path = res["heatmap_path"]
-            if os.path.exists(img_path):
-                img = Image.open(img_path)
-                max_w, max_h = 900, 650
+            # общий контейнер
+            main_frame = tk.Frame(win)
+            main_frame.pack(fill="both", expand=True, padx=10, pady=10)
+
+            # --------------------
+            # Левая часть — heatmap
+            # --------------------
+            left_frame = tk.Frame(main_frame)
+            left_frame.pack(side="left", fill="both", expand=False)
+
+            if os.path.exists(res["heatmap_path"]):
+                from PIL import Image, ImageTk
+                img = Image.open(res["heatmap_path"])
+
+                max_w, max_h = 700, 600
                 w, h = img.size
                 k = min(max_w / w, max_h / h, 1.0)
                 if k < 1.0:
                     img = img.resize((int(w * k), int(h * k)))
 
                 img_tk = ImageTk.PhotoImage(img)
-                lbl = tk.Label(win, image=img_tk)
+                lbl = tk.Label(left_frame, image=img_tk)
                 lbl.image = img_tk
-                lbl.pack(padx=10, pady=10)
+                lbl.pack()
 
-            box = scrolledtext.ScrolledText(win, width=120, height=18)
-            box.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+            # --------------------
+            # Правая часть — текст
+            # --------------------
+            right_frame = tk.Frame(main_frame)
+            right_frame.pack(side="left", fill="both", expand=True, padx=(10, 0))
+
+            box = scrolledtext.ScrolledText(right_frame, width=60, height=30)
+            box.pack(fill="both", expand=True)
 
             lines = []
             lines.append("Выбор значимых атрибутов по корреляции (Spearman)")
             lines.append("")
             lines.append("Как выбирались признаки:")
-            lines.append("1) Взяли только существующие колонки DataFrame, которые являются числовыми или булевыми.")
-            lines.append("2) Построили корреляционную матрицу Spearman (устойчива к выбросам).")
-            lines.append("3) Для каждого признака посчитали 'связность' = среднее(|corr|) с другими признаками.")
-            lines.append("4) Выбрали top по связности и убрали дубли, если |corr| между выбранными > 0.85.")
+            lines.append("1) Взяты числовые и булевые признаки.")
+            lines.append("2) Построена корреляция Spearman (устойчива к выбросам).")
+            lines.append("3) Для каждого признака посчитана средняя |corr|.")
             lines.append("")
-            lines.append("Рекомендуемые атрибуты для обучения модели (можно брать как features):")
+            lines.append("Рекомендуемые признаки:")
             for f in res["selected_features"]:
                 lines.append(f"- {f}")
             lines.append("")
-            lines.append("Конкретное обоснование выбора (с численными корреляциями):")
+            lines.append("Обоснование:")
             lines.extend(res["explanations"])
-            lines.append("")
-            lines.append(
-                "Примечание: корреляция показывает совместную изменчивость признаков. "
-                "Если признак сильно связан с несколькими другими, он отражает общий фактор "
-                "и полезен для группировки/схожести участков."
-            )
 
             box.insert(tk.END, "\n".join(lines))
             box.config(state="disabled")
