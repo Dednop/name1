@@ -1160,6 +1160,361 @@ def cleanup_image_folders():
         except Exception:
             pass
 
+class DatabaseAgent:
+    """
+    Мини-агент для Postgres:
+    - подключение
+    - создание таблиц (если нет)
+    - upsert трека по source_url
+    - сохранение точек/картинок/мета без дублей
+    """
+
+    def __init__(self, cfg: dict):
+        self.cfg = cfg
+        self.conn = None
+
+    def connect(self):
+        if self.conn is not None:
+            return self.conn
+
+        self.conn = psycopg2.connect(
+            host=self.cfg["host"],
+            port=int(self.cfg["port"]),
+            dbname=self.cfg["dbname"],
+            user=self.cfg["user"],
+            password=self.cfg["password"],
+        )
+        self.conn.autocommit = False
+        return self.conn
+
+    def close(self):
+        try:
+            if self.conn is not None:
+                self.conn.close()
+        except Exception:
+            pass
+        self.conn = None
+
+    def init_schema(self):
+        conn = self.connect()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS tracks (
+                    id SERIAL PRIMARY KEY,
+                    source_url TEXT UNIQUE,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                """
+            )
+
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS track_points (
+                    id BIGSERIAL PRIMARY KEY,
+                    track_id INT NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+                    time TIMESTAMPTZ NULL,
+                    latitude DOUBLE PRECISION NOT NULL,
+                    longitude DOUBLE PRECISION NOT NULL,
+                    elevation DOUBLE PRECISION NULL,
+                    temperature DOUBLE PRECISION NULL,
+                    heart_rate INT NULL,
+                    cadence INT NULL,
+                    distance_to_previous DOUBLE PRECISION NULL,
+                    region TEXT NULL,
+                    season TEXT NULL,
+                    forest_nearby BOOLEAN NULL,
+                    water_nearby BOOLEAN NULL,
+                    road_nearby BOOLEAN NULL,
+                    building_nearby BOOLEAN NULL
+                );
+                """
+            )
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_track_points_track ON track_points(track_id);")
+
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS track_images (
+                    track_id INT NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+                    kind TEXT NOT NULL,
+                    content BYTEA NOT NULL,
+                    meta JSONB NULL,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY(track_id, kind)
+                );
+                """
+            )
+        conn.commit()
+        conn.close()
+
+    def upsert_track(self, source_url: str) -> int:
+        conn = self.connect()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO tracks (source_url)
+                VALUES (%s)
+                ON CONFLICT (source_url)
+                DO UPDATE SET updated_at = NOW()
+                RETURNING id;
+                """
+                ,
+                (source_url,),
+            )
+            tid = cur.fetchone()[0]
+        conn.commit()
+        conn.close()
+        return int(tid)
+
+    def ensure_track_id(self, track_id: int, source_url: str | None = None):
+        """
+        Гарантирует, что в таблице tracks существует строка с id=track_id.
+        Это нужно, когда track_id появляется локально (например после аугментации),
+        иначе FK на track_points падает.
+        """
+        conn = self.connect()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO tracks (id, source_url)
+                VALUES (%s, %s)
+                ON CONFLICT (id) DO NOTHING;
+                """,
+                (int(track_id), source_url),
+            )
+            # чтобы SERIAL/sequence не отстал от MAX(id)
+            cur.execute(
+                """
+                SELECT setval(
+                    pg_get_serial_sequence('tracks','id'),
+                    GREATEST((SELECT COALESCE(MAX(id), 1) FROM tracks), 1)
+                );
+                """
+            )
+        conn.commit()
+        conn.close()
+
+    def replace_points(self, track_id: int, df_track: pd.DataFrame):
+        conn = self.connect()
+
+        # ✅ гарантируем, что трек существует (иначе FK упадёт)
+        self.ensure_track_id(int(track_id))
+
+        d = df_track.copy()
+
+        # гарантируем наличие колонок
+        must_cols = [
+            "time",
+            "latitude",
+            "longitude",
+            "elevation",
+            "temperature",
+            "heart_rate",
+            "cadence",
+            "distance_to_previous",
+            "region",
+            "season",
+            "forest_nearby",
+            "water_nearby",
+            "road_nearby",
+            "building_nearby",
+        ]
+        for c in must_cols:
+            if c not in d.columns:
+                d[c] = None
+
+        # bool окружение
+        for c in ENV_COLS:
+            if c in d.columns:
+                try:
+                    d[c] = d[c].astype("boolean")
+                except Exception:
+                    pass
+
+        rows = []
+        for _, r in d.iterrows():
+            rows.append(
+                (
+                    track_id,
+                    r["time"] if pd.notna(r["time"]) else None,
+                    float(r["latitude"]),
+                    float(r["longitude"]),
+                    float(r["elevation"]) if pd.notna(r["elevation"]) else None,
+                    float(r["temperature"]) if pd.notna(r["temperature"]) else None,
+                    int(r["heart_rate"]) if pd.notna(r["heart_rate"]) else None,
+                    int(r["cadence"]) if pd.notna(r["cadence"]) else None,
+                    float(r["distance_to_previous"]) if pd.notna(r["distance_to_previous"]) else None,
+                    str(r["region"]) if pd.notna(r["region"]) else None,
+                    str(r["season"]) if pd.notna(r["season"]) else None,
+                    bool(r["forest_nearby"]) if pd.notna(r["forest_nearby"]) else None,
+                    bool(r["water_nearby"]) if pd.notna(r["water_nearby"]) else None,
+                    bool(r["road_nearby"]) if pd.notna(r["road_nearby"]) else None,
+                    bool(r["building_nearby"]) if pd.notna(r["building_nearby"]) else None,
+                )
+            )
+
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM track_points WHERE track_id=%s;", (track_id,))
+            execute_values(
+                cur,
+                """
+                INSERT INTO track_points (
+                    track_id, time, latitude, longitude,
+                    elevation, temperature, heart_rate, cadence,
+                    distance_to_previous, region, season,
+                    forest_nearby, water_nearby, road_nearby, building_nearby
+                ) VALUES %s
+                """,
+                rows,
+                page_size=5000,
+            )
+        conn.commit()
+        conn.close()
+
+    def upsert_image(self, track_id: int, kind: str, img_bytes: bytes, meta_dict: dict | None):
+        conn = self.connect()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO track_images (track_id, kind, content, meta, updated_at)
+                VALUES (%s, %s, %s, %s, NOW())
+                ON CONFLICT (track_id, kind)
+                DO UPDATE SET
+                    content=EXCLUDED.content,
+                    meta=EXCLUDED.meta,
+                    updated_at=NOW();
+                """,
+                (track_id, kind, psycopg2.Binary(img_bytes), Json(meta_dict) if meta_dict is not None else None),
+            )
+        conn.commit()
+        conn.close()
+
+    def get_image(self, track_id: int, kind: str):
+        conn = self.connect()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT content, meta
+                FROM track_images
+                WHERE track_id=%s AND kind=%s
+                """,
+                (track_id, kind),
+            )
+            row = cur.fetchone()
+
+        if not row:
+            return None, None
+
+        content, meta = row
+        conn.close()
+        return bytes(content), meta
+
+
+def _read_file_bytes(path: str) -> bytes:
+    with open(path, "rb") as f:
+        return f.read()
+
+class DBConnectDialog(tk.Toplevel):
+    """Окно подключения к Postgres. Возвращает cfg dict или None (если закрыли/отменили)."""
+
+    def __init__(self, master, default_cfg=None):
+        super().__init__(master)
+        self.title("Подключение к PostgreSQL")
+        self.resizable(False, False)
+        self.transient(master)
+        self.grab_set()
+
+        self.result_cfg = None
+
+        cfg = default_cfg or {}
+        defaults = {
+            "host": cfg.get("host", "127.0.0.1"),
+            "port": str(cfg.get("port", "5432")),
+            "dbname": cfg.get("dbname", ""),
+            "user": cfg.get("user", "postgres"),
+            "password": cfg.get("password", ""),
+        }
+        self.vars = {k: tk.StringVar(value=v) for k, v in defaults.items()}
+
+        frm = tk.Frame(self)
+        frm.pack(padx=12, pady=12)
+
+        def row(label, key, show=None):
+            r = tk.Frame(frm)
+            r.pack(fill="x", pady=4)
+            tk.Label(r, text=label, width=12, anchor="w").pack(side="left")
+            e = tk.Entry(r, textvariable=self.vars[key], width=32, show=show)
+            e.pack(side="left")
+            return e
+
+        self.e_host = row("Host", "host")
+        self.e_port = row("Port", "port")
+        self.e_db = row("DB name", "dbname")
+        self.e_user = row("User", "user")
+        self.e_pass = row("Password", "password", show="*")
+
+        hint = (
+            "Подключение нужно для сохранения треков/картинок/точек в Postgres.\n"
+            "DB name — это УЖЕ созданная база (в pgAdmin).\n"
+            "Если база не создана — создай её в pgAdmin заранее."
+        )
+        tk.Label(frm, text=hint, justify="left", wraplength=360).pack(pady=(10, 8), anchor="w")
+
+        btns = tk.Frame(frm)
+        btns.pack(fill="x")
+
+        self.btn_test = tk.Button(btns, text="Проверить", command=self._test_connection)
+        self.btn_test.pack(side="left")
+
+        self.btn_ok = tk.Button(btns, text="Подключиться", command=self._ok)
+        self.btn_ok.pack(side="right")
+
+        self.btn_cancel = tk.Button(btns, text="Без БД", command=self._cancel)
+        self.btn_cancel.pack(side="right", padx=6)
+
+        self.protocol("WM_DELETE_WINDOW", self._cancel)
+        self.e_host.focus_set()
+
+    def _cfg(self):
+        return {
+            "host": self.vars["host"].get().strip(),
+            "port": self.vars["port"].get().strip(),
+            "dbname": self.vars["dbname"].get().strip(),
+            "user": self.vars["user"].get().strip(),
+            "password": self.vars["password"].get(),
+        }
+
+    def _test_connection(self):
+        cfg = self._cfg()
+        try:
+            conn = psycopg2.connect(
+                host=cfg["host"],
+                port=int(cfg["port"]),
+                dbname=cfg["dbname"],
+                user=cfg["user"],
+                password=cfg["password"],
+                connect_timeout=5,
+            )
+            conn.close()
+            messagebox.showinfo("PostgreSQL", "Подключение успешно!")
+        except Exception as e:
+            messagebox.showerror("PostgreSQL", f"Ошибка подключения:\n{e}")
+
+    def _ok(self):
+        cfg = self._cfg()
+        if not cfg["dbname"]:
+            messagebox.showwarning("PostgreSQL", "Введите DB name (имя базы)")
+            return
+
+        self.result_cfg = cfg
+        self.grab_release()
+        self.destroy()
+
+    def _cancel(self):
+        self.result_cfg = None
+        self.grab_release()
+        self.destroy()
 
 class GPXAppGUI:
     def __init__(self, master):
@@ -1171,8 +1526,18 @@ class GPXAppGUI:
         self.result_df = None
         self.runner = AsyncRunner(master)
 
-        self.all_buttons = []
+        self.db = None
+        self.db_cfg = None
 
+        self.db_status_var = tk.StringVar(value="DB: нет подключения")
+        status_bar = tk.Label(master, textvariable=self.db_status_var, anchor="w")
+        status_bar.pack(side="bottom", fill="x")
+
+        self._db_sync_in_progress = False
+
+        self._ask_db_connection_on_start()
+
+        self.all_buttons = []
         self.notebook = ttk.Notebook(master)
         self.notebook.pack(fill="both", expand=True)
 
@@ -1190,6 +1555,14 @@ class GPXAppGUI:
         self.create_tab_process()
         self.create_tab_view()
         self.create_tab_augment()
+
+    def _set_db_status(self, text: str):
+        """Обновляет строку статуса БД внизу окна."""
+        try:
+            self.db_status_var.set(text)
+            self.master.update_idletasks()
+        except Exception:
+            pass
 
     def _open_image_window(self, path, title):
         if not os.path.exists(path):
@@ -1248,6 +1621,87 @@ class GPXAppGUI:
 
         except Exception as e:
             messagebox.showerror("Ошибка сохранения", str(e))
+
+    def _ask_db_connection_on_start(self):
+        dlg = DBConnectDialog(
+            self.master,
+            default_cfg={
+                "host": "127.0.0.1",
+                "port": "5432",
+                "dbname": "",
+                "user": "postgres",
+                "password": "",
+            },
+        )
+        self.master.wait_window(dlg)
+
+        cfg = dlg.result_cfg
+        if cfg is None:
+            self.db = None
+            self.db_cfg = None
+            self._set_db_status("DB: нет подключения (работаем без БД)")
+            messagebox.showinfo("PostgreSQL", "Работаем без базы данных. Сохранение в БД отключено.")
+            return
+
+        try:
+            db = DatabaseAgent(cfg)
+            db.init_schema()
+            self.db = db
+            self.db_cfg = cfg
+            self._set_db_status("DB: подключено ✅ | таблицы готовы")
+            messagebox.showinfo("PostgreSQL", "Подключение к БД установлено. Таблицы готовы.")
+        except Exception as e:
+            self.db = None
+            self.db_cfg = None
+            self._set_db_status("DB: ошибка подключения ❌ | работаем без БД")
+            messagebox.showerror(
+                "PostgreSQL",
+                f"Не удалось подключиться/инициализировать БД:\n{e}\n\nРаботаем без БД.",
+            )
+
+    def _db_sync_all_points(self):
+        if self.db is None:
+            return
+        if self.result_df is None or self.result_df.empty:
+            return
+
+        try:
+            self._set_db_status("DB: синхронизация... ⏳")
+        except Exception:
+            pass
+
+        track_ids = sorted(self.result_df["track_id"].unique())
+        for tid in track_ids:
+            df_track = self.result_df[self.result_df["track_id"] == tid].copy()
+            if not df_track.empty:
+                self.db.replace_points(int(tid), df_track)
+
+        # время можно без import datetime, через time:
+        import time
+
+        ts = time.strftime("%H:%M:%S")
+        self._set_db_status(f"DB: актуально ✅ | последняя синхронизация {ts} | треков: {len(track_ids)}")
+
+    def _db_sync_all_points_async(self):
+        if self.db is None:
+            return
+        if self.result_df is None or self.result_df.empty:
+            return
+        if getattr(self, "_db_sync_in_progress", False):
+            return  # ✅ уже идёт синк, не дублим
+
+        self._db_sync_in_progress = True
+        self._set_db_status("DB: синхронизация... ⏳")
+
+        def target():
+            try:
+                self._db_sync_all_points()
+            except Exception as e:
+                self._set_db_status(f"DB: ошибка синхронизации ❌ ({e})")
+            finally:
+                self._db_sync_in_progress = False
+
+        threading.Thread(target=target, daemon=True).start()
 
     def set_busy(self, busy: bool):
         if busy:
