@@ -2596,3 +2596,11 @@ if __name__ == "__main__":
 
     root.protocol("WM_DELETE_WINDOW", on_close)
     root.mainloop()
+
+# 1. conda activate base
+
+# 2. conda install pyinstaller
+
+# 3. cd C:\Users\admin\PycharmProjects\PythonProject1 - путь к папке проекта
+
+# 4. pyinstaller --name GPX_Tracks_Manager --windowed --noconfirm --clean --hidden-import=psycopg2 --hidden-import=psycopg2._psycopg --hidden-import=sklearn --hidden-import=sklearn.utils._cython_blas --hidden-import=seaborn --hidden-import=contextily --hidden-import=rasterio --hidden-import=rasterio.sample --hidden-import=rasterio._io --hidden-import=openpyxl --hidden-import=openpyxl.cell._writer main.py
