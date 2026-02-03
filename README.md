@@ -1555,6 +1555,38 @@ class GPXAppGUI:
         self.create_tab_process()
         self.create_tab_view()
         self.create_tab_augment()
+        self.create_tab_exit()
+
+    def confirm_exit(self):
+        answer = messagebox.askyesno(
+            title="Выход",
+            message="Вы уверены, что хотите выйти из программы?"
+        )
+        if answer:
+            cleanup_image_folders()  # у тебя это уже используется
+            self.master.destroy()
+
+    def create_tab_exit(self):
+        self.tab_exit = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_exit, text="Выход")
+
+        lbl = tk.Label(
+            self.tab_exit,
+            text="Завершение работы программы",
+            font=("Arial", 14, "bold")
+        )
+        lbl.pack(pady=20)
+
+        btn_exit = self._reg_btn(
+            tk.Button(
+                self.tab_exit,
+                text="Выйти из программы",
+                width=30,
+                height=2,
+                command=self.confirm_exit
+            )
+        )
+        btn_exit.pack(pady=10)
 
     def _set_db_status(self, text: str):
         """Обновляет строку статуса БД внизу окна."""
@@ -1639,8 +1671,8 @@ class GPXAppGUI:
         if cfg is None:
             self.db = None
             self.db_cfg = None
-            self._set_db_status("DB: нет подключения (работаем без БД)")
-            messagebox.showinfo("PostgreSQL", "Работаем без базы данных. Сохранение в БД отключено.")
+            self._set_db_status("DB: нет подключения")
+            messagebox.showinfo("PostgreSQL", "Действия без базы данных. Сохранение в БД отключено.")
             return
 
         try:
@@ -1656,7 +1688,7 @@ class GPXAppGUI:
             self._set_db_status("DB: ошибка подключения ❌ | работаем без БД")
             messagebox.showerror(
                 "PostgreSQL",
-                f"Не удалось подключиться/инициализировать БД:\n{e}\n\nРаботаем без БД.",
+                f"Не удалось подключиться/инициализировать БД:\n{e}\n\nБД недоступно.",
             )
 
     def _db_sync_all_points(self):
@@ -1709,61 +1741,67 @@ class GPXAppGUI:
         else:
             enable_widgets(self.all_buttons)
 
-
     def create_tab_load(self):
-        tk.Label(self.tab_load, text="Загрузка треков", font=("Arial", 14, "bold")).pack(pady=(10, 4))
+        # Заголовок вкладки - жирный и по центру
+        tk.Label(self.tab_load, text="Загрузка треков", font=("Arial", 14, "bold")).grid(row=0, column=0, columnspan=2,
+                                                                                         pady=(10, 10), sticky="n",
+                                                                                         padx=12)
 
-        hint = (
-            "Формат ввода ссылок на GPX-треки:\n"
-            "• Каждая ссылка может быть указана на отдельной строке\n"
-            "• Допускается вставка списка ссылок за один раз\n"
-            "• Ссылки могут быть разделены переносами строк, пробелами, запятыми или точкой с запятой\n\n"
-            "Пример корректного ввода:\n"
-            "https://caucasia.ru/track/295\n"
-            "https://caucasia.ru/track/638\n"
-        )
-        tk.Label(self.tab_load, text=hint, justify="left", wraplength=900).pack(pady=(0, 8), anchor="w", padx=12)
+        # Под заголовком выводим количество уникальных ссылок по центру
+        self.links_counter_var = tk.StringVar(value="Ссылок: 0, Уникальных ссылок: 0")
+        tk.Label(self.tab_load, textvariable=self.links_counter_var, font=("Arial", 12)).grid(row=1, column=0,
+                                                                                              columnspan=2,
+                                                                                              pady=(0, 10), sticky="n",
+                                                                                              padx=12)
 
-        btn_frame = tk.Frame(self.tab_load)
-        btn_frame.pack(fill="x", padx=12, pady=(0, 6))
-
-        self.btn_paste = self._reg_btn(
-            tk.Button(btn_frame, text="Вставить из буфера", command=self.paste_links_from_clipboard)
-        )
-        self.btn_paste.pack(side="left", padx=(0, 6))
-
-        self.btn_validate = self._reg_btn(
-            tk.Button(btn_frame, text="Проверка корректности ссылок", command=self.validate_links_ui)
-        )
-        self.btn_validate.pack(side="left", padx=(0, 6))
-
-        self.btn_dedup = self._reg_btn(
-            tk.Button(btn_frame, text="Удалить повторяющиеся ссылки", command=self.dedup_links_ui)
-        )
-        self.btn_dedup.pack(side="left", padx=(0, 6))
-
-        self.btn_clear = self._reg_btn(
-            tk.Button(btn_frame, text="Очистить", command=self.clear_links_ui)
-        )
-        self.btn_clear.pack(side="left")
-
-        self.links_counter_var = tk.StringVar(value="Ссылок: 0 (уникальных: 0)")
-        tk.Label(self.tab_load, textvariable=self.links_counter_var).pack(anchor="w", padx=12, pady=(0, 4))
-
+        # Текстовое поле для ввода ссылок теперь сверху, растягиваем его на два столбца
         self.text_area = scrolledtext.ScrolledText(self.tab_load, width=110, height=14)
-        self.text_area.pack(padx=12, pady=(0, 10), fill="both", expand=False)
+        self.text_area.grid(row=2, column=0, columnspan=2, padx=12, pady=(0, 10), sticky="nsew")
 
         placeholder = "Вставьте ссылки сюда...\n(Одна ссылка на строку)"
         self.text_area.insert("1.0", placeholder)
         self.text_area.bind("<FocusIn>", self._clear_placeholder_if_needed)
         self.text_area.bind("<KeyRelease>", lambda _e: self.update_links_counter())
 
-        self.btn_load = self._reg_btn(
-            tk.Button(self.tab_load, text="Загрузить треки", width=30, command=self.load_tracks)
-        )
-        self.btn_load.pack(pady=10)
+        # Фрейм для кнопок, кнопки теперь расположены под полем ввода, с отступом слева как у текста и поля ввода
+        btn_frame = tk.Frame(self.tab_load)
+        btn_frame.grid(row=3, column=0, columnspan=2, pady=(10, 10), sticky="w",
+                       padx=12)  # Добавили отступ слева как у текста и поля ввода
 
-        self.update_links_counter()
+        # Кнопки для работы с ссылками, выровнены по горизонтали слева
+        self.btn_paste = self._reg_btn(
+            tk.Button(btn_frame, text="Вставить из буфера", command=self.paste_links_from_clipboard))
+        self.btn_paste.grid(row=0, column=0, padx=(0, 6))
+
+        self.btn_dedup = self._reg_btn(
+            tk.Button(btn_frame, text="Удалить повторяющиеся ссылки", command=self.dedup_links_ui))
+        self.btn_dedup.grid(row=0, column=1, padx=(0, 6))
+
+        self.btn_clear = self._reg_btn(
+            tk.Button(btn_frame, text="Очистить", command=self.clear_links_ui, bg="#F44336", fg="white",
+                      font=("Arial", 10)))
+        self.btn_clear.grid(row=0, column=2, padx=(0, 6), pady=10)
+
+        # Добавляем эффект наведения на кнопку "Очистить" (красный цвет при наведении)
+        self.btn_clear.bind("<Enter>", lambda e: e.widget.config(bg="#D32F2F"))  # Красный при наведении
+        self.btn_clear.bind("<Leave>", lambda e: e.widget.config(bg="#F44336"))  # Оригинальный красный цвет
+
+        # Под кнопками добавляем текст с правилами
+        hint = (
+            "Формат ввода ссылок на GPX-треки:\n"
+            "- Каждая ссылка может быть указана на отдельной строке\n"
+            "- Допускается вставка списка ссылок за один раз\n"
+            "- Ссылки могут быть разделены переносами строк, пробелами, запятыми или точкой с запятой\n\n"
+        )
+
+        # Добавляем текст с правилами - выравнивание по левому краю
+        tk.Label(self.tab_load, text=hint, justify="left", wraplength=900).grid(row=4, column=0, columnspan=2,
+                                                                                pady=(0, 10), padx=12, sticky="w")
+
+        # Кнопка для загрузки треков - расположена в правом углу
+        self.btn_load = self._reg_btn(
+            tk.Button(self.tab_load, text="Загрузить треки", width=30, command=self.load_tracks))
+        self.btn_load.grid(row=3, column=1, pady=10, padx=(10, 20), sticky="e")  # В правом углу
 
     def load_tracks(self):
         urls = self.get_links_from_ui()
@@ -2039,38 +2077,86 @@ class GPXAppGUI:
 
         self.runner.run(worker, on_done=on_done, on_error=on_error, on_progress=on_progress)
 
-
     def create_tab_view(self):
+        # Заголовок вкладки
         tk.Label(
             self.tab_view,
             text="Просмотр треков",
             font=("Arial", 14, "bold")
-        ).pack(pady=10)
+        ).pack(pady=(10, 5), anchor="n")
 
-        tk.Label(self.tab_view, text="Выберите трек:").pack()
+        # ===== ЦЕНТРАЛЬНЫЙ КОНТЕЙНЕР =====
+        center_frame = tk.Frame(self.tab_view)
+        center_frame.pack(anchor="n")
 
-        self.track_combo = ttk.Combobox(self.tab_view, state="readonly")
-        self.track_combo.pack()
+        # Надпись по центру
+        tk.Label(
+            center_frame,
+            text="Выберите трек:",
+            font=("Arial", 11)
+        ).pack(pady=(0, 5))  # небольшая подушка снизу
+
+        # Комбобокс для выбора трека
+        self.track_combo = ttk.Combobox(
+            center_frame,
+            state="readonly",
+            width=32
+        )
+        self.track_combo.pack(pady=(0, 10))  # отступ перед первой кнопкой
+
+        # ===== КНОПКИ =====
+        BTN_WIDTH = 26
+        BTN_HEIGHT = 1
+        BUTTON_PADY = 5  # одинаковый отступ между кнопками
 
         self.btn_update_tracks = self._reg_btn(
-            tk.Button(self.tab_view, text="Обновить список треков", command=self.update_track_list)
+            tk.Button(
+                center_frame,
+                text="Обновить список треков",
+                width=BTN_WIDTH,
+                height=BTN_HEIGHT,
+                command=self.update_track_list
+            )
         )
-        self.btn_update_tracks.pack(pady=5)
+        self.btn_update_tracks.pack(pady=(0, BUTTON_PADY))
 
         self.btn_show_map = self._reg_btn(
-            tk.Button(self.tab_view, text="Показать карту трека", command=self.show_track_map)
+            tk.Button(
+                center_frame,
+                text="Показать карту трека",
+                width=BTN_WIDTH,
+                height=BTN_HEIGHT,
+                command=self.show_track_map
+            )
         )
-        self.btn_show_map.pack(pady=5)
+        self.btn_show_map.pack(pady=(0, BUTTON_PADY))
 
         self.btn_show_df = self._reg_btn(
-            tk.Button(self.tab_view, text="Показать DataFrame трека", command=self.show_dataframe)
+            tk.Button(
+                center_frame,
+                text="Показать DataFrame трека",
+                width=BTN_WIDTH,
+                height=BTN_HEIGHT,
+                command=self.show_dataframe
+            )
         )
-        self.btn_show_df.pack(pady=5)
-        self.btn_save_all_one = self._reg_btn(
-            tk.Button(self.tab_view, text="Сохранить все треки в один Excel", command=self.save_all_tracks_to_one_excel)
-        )
-        self.btn_save_all_one.pack(pady=5)
+        self.btn_show_df.pack(pady=(0, BUTTON_PADY))
 
+        # ЗЕЛЁНАЯ КНОПКА СОХРАНЕНИЯ
+        self.btn_save_all_one = self._reg_btn(
+            tk.Button(
+                center_frame,
+                text="Сохранить все треки в один Excel",
+                width=BTN_WIDTH,
+                height=BTN_HEIGHT,
+                bg="#4CAF50",
+                fg="white",
+                activebackground="#45A049",
+                activeforeground="white",
+                command=self.save_all_tracks_to_one_excel
+            )
+        )
+        self.btn_save_all_one.pack(pady=(0, BUTTON_PADY))
 
     def update_track_list(self):
         if self.result_df is None or self.result_df.empty:
@@ -2124,16 +2210,17 @@ class GPXAppGUI:
         text.insert(tk.END, df.to_string())
         text.config(state="disabled")
 
-
     def create_tab_augment(self):
+        # Заголовок вкладки
         tk.Label(
             self.tab_augment,
             text="Аугментация треков",
             font=("Arial", 14, "bold")
-        ).pack(pady=10)
+        ).pack(pady=(10, 5))
 
+        # ===== КНОПКА АУГМЕНТАЦИИ + INFO =====
         frame = tk.Frame(self.tab_augment)
-        frame.pack(pady=8)
+        frame.pack(pady=(0, 10))  # небольшой отступ снизу
 
         self.btn_augment_all = self._reg_btn(
             tk.Button(
@@ -2153,35 +2240,62 @@ class GPXAppGUI:
                 command=lambda: messagebox.showinfo(
                     "Аугментация треков",
                     "Выполняется аугментация всех загруженных треков:\n\n"
-                    "• Поворот фоновой карты на 180°\n"
-                    "• Формирование нового трека\n"
-                    "• Пересчёт окружения по изображению\n\n"
+                    "- Поворот фоновой карты на 180°\n"
+                    "- Формирование нового трека\n"
+                    "- Пересчёт окружения по изображению\n\n"
                     "Каждый аугментированный трек добавляется как отдельный track_id."
                 ),
             )
         )
         info_btn.pack(side="left", padx=6)
 
-        tk.Label(self.tab_augment, text="Просмотр треков (оригинал + аугментированные):").pack(pady=10)
+        # ===== НАДПИСЬ И КОМБОБОКС =====
+        tk.Label(
+            self.tab_augment,
+            text="Просмотр треков (оригинальные + аугментированные):",
+            font=("Arial", 11)
+        ).pack(pady=(5, 5))
 
-        self.augment_combo = ttk.Combobox(self.tab_augment, state="readonly")
-        self.augment_combo.pack()
+        self.augment_combo = ttk.Combobox(
+            self.tab_augment,
+            state="readonly",
+            width=32
+        )
+        self.augment_combo.pack(pady=(0, 10))
+
+        # ===== КНОПКИ =====
+        BTN_WIDTH = 40
+        BUTTON_PADY = 5  # одинаковый отступ между кнопками
 
         self.btn_update_aug = self._reg_btn(
-            tk.Button(self.tab_augment, text="Обновить список треков", command=self.update_augment_list)
+            tk.Button(
+                self.tab_augment,
+                text="Обновить список треков",
+                width=BTN_WIDTH,
+                command=self.update_augment_list
+            )
         )
-        self.btn_update_aug.pack(pady=5)
+        self.btn_update_aug.pack(pady=(0, BUTTON_PADY))
 
         self.btn_show_aug_map = self._reg_btn(
-            tk.Button(self.tab_augment, text="Показать карту выбранного трека", command=self.show_selected_track_map)
+            tk.Button(
+                self.tab_augment,
+                text="Показать карту выбранного трека",
+                width=BTN_WIDTH,
+                command=self.show_selected_track_map
+            )
         )
-        self.btn_show_aug_map.pack(pady=5)
+        self.btn_show_aug_map.pack(pady=(0, BUTTON_PADY))
 
         self.btn_show_aug_df = self._reg_btn(
-            tk.Button(self.tab_augment, text="Показать DataFrame выбранного трека",
-                      command=self.show_selected_track_dataframe)
+            tk.Button(
+                self.tab_augment,
+                text="Показать DataFrame выбранного трека",
+                width=BTN_WIDTH,
+                command=self.show_selected_track_dataframe
+            )
         )
-        self.btn_show_aug_df.pack(pady=5)
+        self.btn_show_aug_df.pack(pady=(0, BUTTON_PADY))
 
     def update_augment_list(self):
         if self.result_df is None or self.result_df.empty:
@@ -2506,7 +2620,7 @@ class GPXAppGUI:
     def update_links_counter(self):
         links = self.get_links_from_ui()
         uniq = list(dict.fromkeys(links))
-        self.links_counter_var.set(f"Ссылок: {len(links)} (уникальных: {len(uniq)})")
+        self.links_counter_var.set(f"Ссылок: {len(links)}, Уникальных: {len(uniq)}")
 
     def paste_links_from_clipboard(self):
         try:
@@ -2596,11 +2710,3 @@ if __name__ == "__main__":
 
     root.protocol("WM_DELETE_WINDOW", on_close)
     root.mainloop()
-
-# 1. conda activate base
-
-# 2. conda install pyinstaller
-
-# 3. cd C:\Users\admin\PycharmProjects\PythonProject1 - путь к папке проекта
-
-# 4. pyinstaller --name GPX_Tracks_Manager --windowed --noconfirm --clean --hidden-import=psycopg2 --hidden-import=psycopg2._psycopg --hidden-import=sklearn --hidden-import=sklearn.utils._cython_blas --hidden-import=seaborn --hidden-import=contextily --hidden-import=rasterio --hidden-import=rasterio.sample --hidden-import=rasterio._io --hidden-import=openpyxl --hidden-import=openpyxl.cell._writer main.py
