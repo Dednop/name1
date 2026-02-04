@@ -3344,3 +3344,4 @@ if __name__ == "__main__":
 
     root.protocol("WM_DELETE_WINDOW", on_close)
     root.mainloop()
+ы
